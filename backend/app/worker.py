@@ -39,6 +39,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
+import shutil
 import signal
 import socket
 import sys
@@ -54,16 +56,74 @@ logger = get_logger(__name__)
 
 # ── Tunables (env overrides) ────────────────────────────────────────────
 
-#: Pulled per-loop. Cached defaults are used when the env var is unset.
-_RUN_BATCH_SIZE = int(os.environ.get("ARCHON_RUN_BATCH_SIZE", "10"))
-_MAX_CONCURRENT_RUNS = int(os.environ.get("ARCHON_MAX_CONCURRENT_RUNS", "50"))
-_DRAIN_INTERVAL = 5  # seconds between drain ticks
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    parsed = int(value)
+    return max(parsed, minimum)
+
+
+def _env_int_alias(
+    primary: str,
+    alias: str,
+    default: int,
+    *,
+    minimum: int = 1,
+) -> int:
+    if primary in os.environ:
+        return _env_int(primary, default, minimum=minimum)
+    return _env_int(alias, default, minimum=minimum)
+
+
+#: Pulled once at process start. Cached defaults are used when env vars are unset.
+_RUN_BATCH_SIZE = _env_int("ARCHON_RUN_BATCH_SIZE", 10)
+_MAX_CONCURRENT_RUNS = _env_int_alias(
+    "ARCHON_MAX_CONCURRENT_RUNS",
+    "ARCHON_WORKER_CONCURRENCY",
+    50,
+)
+_DRAIN_INTERVAL = _env_int("ARCHON_DRAIN_INTERVAL", 5)
 _HEARTBEAT_INTERVAL = 10  # seconds between heartbeat refreshes
 _RECLAIM_INTERVAL = 30  # seconds between expired-lease reclaim sweeps
 _RECLAIM_GRACE_SECONDS = 10  # see reclaim_expired_runs(grace=...)
 _SHUTDOWN_GRACE_SECONDS = 30  # how long to wait for in-flight dispatches
 _TIMER_FIRE_INTERVAL = 5  # seconds between timer-fire ticks
-_TIMER_FIRE_BATCH = int(os.environ.get("ARCHON_TIMER_FIRE_BATCH", "100"))
+_TIMER_FIRE_BATCH = _env_int("ARCHON_TIMER_FIRE_BATCH", 100)
+_WORKER_SCAN_INTERVAL = _env_int("ARCHON_WORKER_SCAN_INTERVAL", 300)
+_LOOP_BACKOFF_MAX_SECONDS = _env_int("ARCHON_LOOP_BACKOFF_MAX_SECONDS", 60)
+_MIN_FREE_DISK_MB = _env_int("ARCHON_MIN_FREE_DISK_MB", 256, minimum=0)
+
+
+def _loop_backoff_seconds(error_streak: int) -> float:
+    if error_streak <= 0:
+        return 0
+    base = min(2 ** min(error_streak - 1, 6), _LOOP_BACKOFF_MAX_SECONDS)
+    return min(base + random.uniform(0, 1), _LOOP_BACKOFF_MAX_SECONDS)
+
+
+async def _loop_sleep(
+    shutdown: asyncio.Event,
+    interval: float,
+    error_streak: int = 0,
+) -> None:
+    delay = max(interval, _loop_backoff_seconds(error_streak))
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=delay)
+    except asyncio.TimeoutError:
+        pass
+
+
+def _ensure_min_free_disk() -> None:
+    if _MIN_FREE_DISK_MB <= 0:
+        return
+    usage = shutil.disk_usage("/")
+    free_mb = usage.free // (1024 * 1024)
+    if free_mb < _MIN_FREE_DISK_MB:
+        raise RuntimeError(
+            f"worker startup aborted: only {free_mb}MB free on container filesystem "
+            f"(minimum {_MIN_FREE_DISK_MB}MB)"
+        )
 
 # ── Module-level state (process-wide singletons) ────────────────────────
 
@@ -449,6 +509,7 @@ async def _call_dispatch_run(run_id, worker_id: str) -> None:
 
 async def _heartbeat_loop(worker_id: str, shutdown: asyncio.Event) -> None:
     """Refresh the worker heartbeat row on a fixed interval."""
+    error_streak = 0
     while not shutdown.is_set():
         try:
             async with async_session_factory() as session:
@@ -464,13 +525,12 @@ async def _heartbeat_loop(worker_id: str, shutdown: asyncio.Event) -> None:
                         pid=os.getpid(),
                         capabilities={},
                     )
+            error_streak = 0
         except Exception:
+            error_streak += 1
             logger.exception("worker_heartbeat_error", worker_id=worker_id)
 
-        try:
-            await asyncio.wait_for(shutdown.wait(), timeout=_HEARTBEAT_INTERVAL)
-        except asyncio.TimeoutError:
-            pass
+        await _loop_sleep(shutdown, _HEARTBEAT_INTERVAL, error_streak)
 
 
 async def _invoke_reclaim(reclaim, worker_id: str) -> int:
@@ -525,6 +585,7 @@ async def _reclaim_loop(worker_id: str, shutdown: asyncio.Event) -> None:
     when available; no-ops cleanly otherwise. The dispatcher / lifecycle
     module is the single source of truth for what "expired" means.
     """
+    error_streak = 0
     while not shutdown.is_set():
         try:
             reclaim = _resolve_reclaim_expired_runs()
@@ -536,13 +597,12 @@ async def _reclaim_loop(worker_id: str, shutdown: asyncio.Event) -> None:
                         worker_id=worker_id,
                         reclaimed=count,
                     )
+            error_streak = 0
         except Exception:
+            error_streak += 1
             logger.exception("worker_reclaim_error", worker_id=worker_id)
 
-        try:
-            await asyncio.wait_for(shutdown.wait(), timeout=_RECLAIM_INTERVAL)
-        except asyncio.TimeoutError:
-            pass
+        await _loop_sleep(shutdown, _RECLAIM_INTERVAL, error_streak)
 
 
 async def _drain_loop(
@@ -571,6 +631,16 @@ async def _drain_loop(
     if shutdown.is_set():
         return
 
+    available_slots = max(_MAX_CONCURRENT_RUNS - len(_inflight), 0)
+    if available_slots == 0:
+        logger.debug(
+            "worker_drain_skipped_inflight_full",
+            worker_id=worker_id,
+            inflight=len(_inflight),
+            max_concurrent=_MAX_CONCURRENT_RUNS,
+        )
+        return
+
     try:
         from sqlalchemy import text
 
@@ -587,7 +657,7 @@ async def _drain_loop(
                     "ORDER BY "
                     "  CASE WHEN queued_at IS NULL THEN 1 ELSE 0 END, "
                     "  queued_at, created_at "
-                    f"LIMIT {_RUN_BATCH_SIZE}"
+                    f"LIMIT {min(_RUN_BATCH_SIZE, available_slots)}"
                 ).bindparams(now=now_naive)
             )
             candidate_ids = [row[0] for row in result]
@@ -792,6 +862,7 @@ async def _timer_fire_loop(worker_id: str, shutdown: asyncio.Event) -> None:
     drain claims queued. The two loops never contend because their
     target statuses are disjoint.
     """
+    error_streak = 0
     while not shutdown.is_set():
         try:
             count = await _timer_fire_tick(worker_id)
@@ -801,15 +872,12 @@ async def _timer_fire_loop(worker_id: str, shutdown: asyncio.Event) -> None:
                     worker_id=worker_id,
                     resumed=count,
                 )
+            error_streak = 0
         except Exception:
+            error_streak += 1
             logger.exception("worker_timer_loop_error", worker_id=worker_id)
 
-        try:
-            await asyncio.wait_for(
-                shutdown.wait(), timeout=_TIMER_FIRE_INTERVAL
-            )
-        except asyncio.TimeoutError:
-            pass
+        await _loop_sleep(shutdown, _TIMER_FIRE_INTERVAL, error_streak)
 
 
 # ── Public entry point ────────────────────────────────────────────────
@@ -872,7 +940,7 @@ async def run_worker(
 
     # Slow loop preserved from the legacy worker.
     async def _slow_loop() -> None:
-        scan_interval = 300
+        error_streak = 0
         while not _shutdown.is_set():
             try:
                 await _run_scheduled_scans()
@@ -880,21 +948,23 @@ async def run_worker(
                 await _run_budget_alerts()
                 await _check_scheduled_workflows()
                 await _run_improvement_analysis()
+                error_streak = 0
             except Exception:
+                error_streak += 1
                 logger.exception("worker_slow_tick_error")
 
-            try:
-                await asyncio.wait_for(_shutdown.wait(), timeout=scan_interval)
-            except asyncio.TimeoutError:
-                pass
+            await _loop_sleep(_shutdown, _WORKER_SCAN_INTERVAL, error_streak)
 
     async def _drain_tick_loop() -> None:
+        error_streak = 0
         while not _shutdown.is_set():
-            await _drain_loop(worker_id, _dispatch_semaphore, _shutdown)
             try:
-                await asyncio.wait_for(_shutdown.wait(), timeout=_DRAIN_INTERVAL)
-            except asyncio.TimeoutError:
-                pass
+                await _drain_loop(worker_id, _dispatch_semaphore, _shutdown)
+                error_streak = 0
+            except Exception:
+                error_streak += 1
+                logger.exception("worker_drain_tick_loop_error", worker_id=worker_id)
+            await _loop_sleep(_shutdown, _DRAIN_INTERVAL, error_streak)
 
     try:
         await asyncio.gather(
@@ -971,6 +1041,7 @@ def request_shutdown() -> None:
 async def main() -> None:
     """Configure logging and run the worker until shutdown."""
     setup_logging(log_level="INFO")
+    _ensure_min_free_disk()
     logger.info("worker_started", time=datetime.now(tz=timezone.utc).isoformat())
     await run_worker(max_concurrent=_MAX_CONCURRENT_RUNS)
 
