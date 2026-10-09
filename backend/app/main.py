@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import app.sqlmodel_compat  # noqa: F401  (must load before any model write)
 from app.config import settings
 from app.health import router as health_router
 from app.logging_config import get_logger, request_id_ctx, setup_logging
