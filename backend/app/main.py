@@ -18,86 +18,90 @@ from app.config import settings
 from app.health import router as health_router
 from app.logging_config import get_logger, request_id_ctx, setup_logging
 
-# Phase 1 routers
-from app.routes.agents import router as agents_router
-from app.routes.agent_versions import router as agent_versions_router
-from app.routes.audit_logs import router as audit_logs_router
-from app.routes.connectors import router as connectors_router
-from app.routes.connectors import enterprise as connectors_enterprise
-from app.routes.executions import router as executions_router
-from app.routes.models import router as models_router
-from app.routes.models import router_api as router_api_router
-from app.routes.sandbox import router as sandbox_router
-from app.routes.templates import router as templates_router
-from app.routes.versioning import router as versioning_router
-from app.routes.wizard import router as wizard_router
-from app.websocket.routes import router as ws_router
-
-# Phase 2 routers
-from app.routes.router import router as router_router
-from app.routes.lifecycle import router as lifecycle_router
-from app.routes.lifecycle import lifecycle_v1_router
-from app.routes.cost import router as cost_router
-from app.routes.tenancy import router as tenancy_router
-
-# Phase 3 routers
-from app.routes.dlp import router as dlp_router
-from app.routes.governance import router as governance_router
-from app.routes.sentinelscan import (
-    router as sentinelscan_router,
-    scan_router as sentinelscan_scan_router,
-    enterprise_router as sentinelscan_enterprise_router,
-)
-from app.routes.mcp_security import router as mcp_security_router
-
-# Workflow routers
-from app.routes.workflows import router as workflows_router
-
-# QA Trigger & Improvement Engine routers
-from app.routes.qa import router as qa_router
-from app.routes.improvements import router as improvements_router
+# Metrics
+from app.metrics import router as metrics_router
+from app.routes.a2a import federation_router as a2a_federation_router
 
 # Phase 4 routers
 from app.routes.a2a import router as a2a_router
-from app.routes.a2a import federation_router as a2a_federation_router
+from app.routes.admin import router as admin_router
+from app.routes.agent_versions import router as agent_versions_router
 
-# Phase 5 routers
-from app.routes.mcp import router as mcp_router
-from app.routes.marketplace import router as marketplace_router
+# Phase 1 routers
+from app.routes.agents import router as agents_router
+from app.routes.audit_logs import router as audit_logs_router
+from app.routes.auth_routes import router as auth_router
+from app.routes.connectors import enterprise as connectors_enterprise
+from app.routes.connectors import router as connectors_router
+from app.routes.cost import router as cost_router
+from app.routes.deployment import router as deployment_router
 
-# Phase 6 routers
-from app.routes.mesh import router as mesh_router
-from app.routes.edge import router as edge_router
+# Phase 3 routers
+from app.routes.dlp import router as dlp_router
+from app.routes.docforge import collections_router as docforge_collections_router
 
 # DocForge routers
 from app.routes.docforge import router as docforge_router
-from app.routes.docforge import collections_router as docforge_collections_router
+from app.routes.edge import router as edge_router
+from app.routes.executions import router as executions_router
+from app.routes.governance import router as governance_router
+from app.routes.improvements import router as improvements_router
+from app.routes.lifecycle import lifecycle_v1_router
+from app.routes.lifecycle import router as lifecycle_router
+from app.routes.marketplace import router as marketplace_router
 
-# Enterprise SSO & SCIM routers
-from app.routes.saml import router as saml_router
-from app.routes.scim import router as scim_router
-from app.routes.auth_routes import router as auth_router
-from app.routes.sso import router as sso_router
-from app.routes.sso_config import router as sso_config_router
-from app.routes.totp import router as totp_router
-
-# Additional routers (self-prefixed with /api/v1)
-from app.routes.secrets import router as secrets_router
-from app.routes.deployment import router as deployment_router
-from app.routes.redteam import router as redteam_router
-from app.routes.tenants import router as tenants_router
-from app.routes.mobile import router as mobile_router
-from app.routes.mcp_interactive import router as mcp_interactive_router
-from app.routes.security_proxy import router as security_proxy_router
-from app.routes.admin import router as admin_router
-from app.routes.settings import router as settings_router
-from app.routes.rbac import router as rbac_router
-
-# Metrics
-from app.metrics import router as metrics_router
+# Phase 5 routers
+from app.routes.mcp import router as mcp_router
 
 # MCP Container management (ToolHive pattern)
 from app.routes.mcp_containers import router as mcp_containers_router
+from app.routes.mcp_interactive import router as mcp_interactive_router
+from app.routes.mcp_security import router as mcp_security_router
+
+# Phase 6 routers
+from app.routes.mesh import router as mesh_router
+from app.routes.mobile import router as mobile_router
+from app.routes.models import router as models_router
+from app.routes.models import router_api as router_api_router
+
+# QA Trigger & Improvement Engine routers
+from app.routes.qa import router as qa_router
+from app.routes.rbac import router as rbac_router
+from app.routes.redteam import router as redteam_router
+
+# Phase 2 routers
+from app.routes.router import router as router_router
+
+# Enterprise SSO & SCIM routers
+from app.routes.saml import router as saml_router
+from app.routes.sandbox import router as sandbox_router
+from app.routes.scim import router as scim_router
+
+# Additional routers (self-prefixed with /api/v1)
+from app.routes.secrets import router as secrets_router
+from app.routes.security_proxy import router as security_proxy_router
+from app.routes.sentinelscan import (
+    enterprise_router as sentinelscan_enterprise_router,
+)
+from app.routes.sentinelscan import (
+    router as sentinelscan_router,
+)
+from app.routes.sentinelscan import (
+    scan_router as sentinelscan_scan_router,
+)
+from app.routes.settings import router as settings_router
+from app.routes.sso import router as sso_router
+from app.routes.sso_config import router as sso_config_router
+from app.routes.templates import router as templates_router
+from app.routes.tenancy import router as tenancy_router
+from app.routes.tenants import router as tenants_router
+from app.routes.totp import router as totp_router
+from app.routes.versioning import router as versioning_router
+from app.routes.wizard import router as wizard_router
+
+# Workflow routers
+from app.routes.workflows import router as workflows_router
+from app.websocket.routes import router as ws_router
 
 logger = get_logger(__name__)
 
@@ -271,12 +275,13 @@ def create_app() -> FastAPI:
     @application.on_event("startup")
     async def on_startup() -> None:
         """Create database tables on startup and seed default user."""
-        from app.database import create_db_and_tables, async_session_factory
+        from app.database import async_session_factory, create_db_and_tables
 
         await create_db_and_tables()
         async with async_session_factory() as session:
-            from app.models import User
             from sqlmodel import select
+
+            from app.models import User
 
             result = await session.exec(select(User).limit(1))
             if result.first() is None:
