@@ -1,12 +1,19 @@
-# Archon Docker Compose — Minimal Dev/Test Stack
+# Archon Docker Compose — Coolify deployment
+#
+# Differences from upstream (dev stack), all required for a public host:
+#   * no host port publishing (Coolify/Traefik routes the frontend; the host
+#     already owns 8000/8180/5432) — services are reachable over `expose`
+#   * restart policy + named volume for postgres
+#   * secrets interpolated from Coolify env (see Coolify app env)
+#   * keycloak dropped: it needs realm/bootstrap config to be useful and the
+#     backend runs with ARCHON_AUTH_DEV_MODE=true; re-add if SSO is wanted
 services:
   postgres:
     image: postgres:16-alpine
-    ports:
-      - "5432:5432"
+    restart: unless-stopped
     environment:
       POSTGRES_USER: archon
-      POSTGRES_PASSWORD: archon
+      POSTGRES_PASSWORD: ${ARCHON_POSTGRES_PASSWORD}
       POSTGRES_DB: archon
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -14,68 +21,48 @@ services:
       test: ["CMD-SHELL", "pg_isready -U archon"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   backend:
     build: ./backend
-    ports:
-      - "8000:8000"
+    restart: unless-stopped
+    expose:
+      - "8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      ARCHON_DATABASE_URL: "postgresql+asyncpg://archon:archon@postgres:5432/archon"
+      # yamllint disable-line rule:line-length
+      ARCHON_DATABASE_URL: "postgresql+asyncpg://archon:${ARCHON_POSTGRES_PASSWORD}@postgres:5432/archon"
       ARCHON_REDIS_URL: "redis://redis:6379/0"
       ARCHON_AUTH_DEV_MODE: "true"
-      ARCHON_JWT_SECRET: "dev-secret-key-for-testing"
+      ARCHON_JWT_SECRET: ${ARCHON_JWT_SECRET}
       ARCHON_JWT_ALGORITHM: "HS256"
-      ARCHON_DEBUG: "true"
-      ARCHON_VAULT_ADDR: "http://vault:8200"
-      ARCHON_VAULT_TOKEN_PATH: "/var/run/secrets/vault-token"
-      ARCHON_VAULT_NAMESPACE: "archon"
-      ARCHON_VAULT_MOUNT_POINT: "secret"
-      ARCHON_VAULT_TOKEN: "dev-root-token"
+      ARCHON_DEBUG: "false"
+      ARCHON_LOG_LEVEL: "INFO"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 15s
-
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.0
-    ports:
-      - "8180:8080"
-    command: start-dev
-    environment:
-      KC_DB: dev-file
-      KC_HEALTH_ENABLED: "true"
-      KC_HTTP_RELATIVE_PATH: /auth
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
-    healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && timeout 1 cat <&3 | grep -q 'UP'"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
+      retries: 12
+      start_period: 30s
 
   frontend:
     build: ./frontend
-    ports:
-      - "3000:3000"
+    restart: unless-stopped
+    expose:
+      - "3000"
     depends_on:
       backend:
         condition: service_healthy
